@@ -1,0 +1,22 @@
+services:
+  timescaledb:
+    image: timescale/timescaledb-ha:pg17
+    container_name: postgres
+    env_file: 
+      - .env
+    environment:
+      POSTGRES_USER: ${POSTGRES_ADMIN_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_ADMIN_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - fullstack
+    ports:
+      - "5432:5432"
+
+volumes:
+  postgres_data:
+
+networks:
+  fullstack:
+    driver: bridge
