@@ -1,4 +1,4 @@
-package fetch
+package provider
 
 func optionalString(v any) *string {
 	if s, ok := v.(string); ok {

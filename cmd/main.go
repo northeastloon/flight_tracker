@@ -7,8 +7,10 @@ import (
 	"log/slog"
 
 	"github.com/joho/godotenv"
-	"github.com/northeastloon/flight_tracker/internal/fetch"
+	"github.com/northeastloon/flight_tracker/internal/domain"
 	storage "github.com/northeastloon/flight_tracker/internal/postgres"
+	"github.com/northeastloon/flight_tracker/internal/provider"
+	"github.com/northeastloon/flight_tracker/internal/server"
 )
 
 func Run() error {
@@ -28,18 +30,23 @@ func Run() error {
 		return fmt.Errorf("failed to migrate database: %w", err)
 	}
 
-	//fetcher
-	OpenSkyClient := fetch.NewOpenSkyClient(fetch.WithQueryParam("extended", "true"))
+	//initialise fetcher(s)
+	OpenSkyClient := provider.NewOpenSkyClient(provider.WithQueryParam("extended", "true"))
 
-	states, err := OpenSkyClient.FetchTelemetry(context.Background())
+	//start ingest service
+	ctx := context.Background()
+	fds := domain.NewFlightDataService(OpenSkyClient, db)
+
+	go fds.StartIngestionLoop(ctx, 10)
+
+	//initialise server
+	server, err := server.NewServer(db)
 	if err != nil {
-		return fmt.Errorf("failed to fetch open sky states: %w", err)
+		return fmt.Errorf("failed to initialise server: %w", err)
 	}
 
-	fmt.Println(states)
-
-	if err := db.InsertAircraftState(states); err != nil {
-		return fmt.Errorf("failed to insert aircraft state: %w", err)
+	if err := server.Echo.Start(":8080"); err != nil {
+		return fmt.Errorf("failed to start server: %w", err)
 	}
 
 	return nil

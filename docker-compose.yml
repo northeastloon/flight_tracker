@@ -14,6 +14,18 @@ services:
     ports:
       - "5432:5432"
 
+  pgweb:
+    image: sosedoff/pgweb
+    container_name: pgweb
+    ports:
+      - "8081:8081"
+    environment:
+      PGWEB_DATABASE_URL: postgres://${POSTGRES_ADMIN_USER}:${POSTGRES_ADMIN_PASSWORD}@timescaledb:${POSTGRES_PORT}/${DB_NAME}?sslmode=${SSL_MODE}
+    depends_on:
+      - timescaledb
+    networks:
+      - fullstack
+
 volumes:
   postgres_data:
 

@@ -1,0 +1,161 @@
+{{/* Base template */}}
+{{define "title"}}3D Flight Globe{{end}}
+
+{{define "head_extra"}}
+  <style> body { margin: 0; } </style>
+  <script type="importmap">{
+    "imports": {
+      "three": "https://esm.sh/three",
+      "three/": "https://esm.sh/three/"
+    }
+  }</script>
+{{end}}
+
+{{define "content"}}
+  <div id="globeViz"></div>
+
+  {{/* The main module script. Go's html/template is context-aware and safe for script tags. */}}
+  <script type="module">
+    import ThreeGlobe from 'https://esm.sh/three-globe?external=three';
+    import * as THREE from 'https://esm.sh/three';
+    import { TrackballControls } from 'three/examples/jsm/controls/TrackballControls.js?external=three';
+
+
+    function createParticleTexture(color = 'rgba(255, 255, 255, 0.7)', size = 32) {
+      const canvas = document.createElement('canvas');
+      canvas.width = size;
+      canvas.height = size;
+      const context = canvas.getContext('2d');
+      const centerX = size / 2;
+      const centerY = size / 2;
+      const radius = size / 2;
+
+      context.beginPath();
+      context.arc(centerX, centerY, radius, 0, 2 * Math.PI, false);
+      context.fillStyle = color;
+      context.fill();
+
+      const texture = new THREE.CanvasTexture(canvas);
+      texture.needsUpdate = true; // Ensure texture updates
+      return texture;
+    }
+
+    // Create the texture once
+    const particleTexture = createParticleTexture('rgba(255, 200, 0, 1', 64); // Yellowish, s
+
+    const Globe = new ThreeGlobe()
+      .globeTileEngineUrl((x, y, z) =>
+        // Use backticks or escape the $ if needed, but should be fine here.
+        `https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/${z}/${y}/${x}`
+      ).particleLat('lat')
+      .particleLng('lng')
+      .particleAltitude('alt')
+      .particlesTexture(() => particleTexture)
+      .particlesSize(() => 0.15) 
+      //.particlesColor('color')
+      //.particleLabel('label')
+      ;
+
+      try {
+        // Traverse the Globe object itself (assuming it's the THREE.Group)
+        Globe.traverse(object => {
+            // Find the Points object used for particles
+            if (object.isPoints) {
+                console.log("Found Points object, modifying material for transparency.");
+                const material = object.material;
+                if (material) {
+                    material.transparent = true;  // Enable transparency
+                    material.depthWrite = false; // Disable writing to depth buffer for proper blending
+                    material.alphaTest = 0;     // Disable alpha testing (rely on blending)
+                    // Optional: Ensure blending mode is suitable if needed
+                    // material.blending = THREE.NormalBlending;
+                    material.needsUpdate = true; // Signal material change
+                } else {
+                   console.warn("Points object found, but has no material.");
+                }
+            }
+        });
+    } catch (e) {
+        console.error("Error traversing Globe object or modifying material:", e);
+    }
+
+    const R = Globe.getGlobeRadius();
+
+    // Setup renderer
+    const renderer = new THREE.WebGLRenderer();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(window.devicePixelRatio);
+    document.getElementById('globeViz').appendChild(renderer.domElement);
+
+    // Setup scene
+    const scene = new THREE.Scene();
+    scene.add(Globe);
+    scene.add(new THREE.AmbientLight(0xcccccc, Math.PI));
+    scene.add(new THREE.DirectionalLight(0xffffff, 0.6 * Math.PI));
+
+    // Setup camera
+    const camera = new THREE.PerspectiveCamera();
+    camera.aspect = window.innerWidth/window.innerHeight;
+    camera.near = 1e-3;
+    camera.far = R * 100;
+    camera.updateProjectionMatrix();
+    camera.position.z = 600;
+
+    // Add camera controls
+    const tbControls = new TrackballControls(camera, renderer.domElement);
+    tbControls.minDistance = R * (1 + 5 / 2**Globe.globeTileEngineMaxLevel());
+    tbControls.maxDistance = camera.far - R;
+    tbControls.rotateSpeed = 5;
+    tbControls.zoomSpeed = 0.8;
+
+    // Update pov when camera moves
+    Globe.setPointOfView(camera);
+    tbControls.addEventListener('change', () => {
+      Globe.setPointOfView(camera);
+      const distToSurface = camera.position.distanceTo(Globe.position) - R;
+      tbControls.rotateSpeed = distToSurface / R * 2.5;
+      tbControls.zoomSpeed = Math.sqrt(distToSurface / R) * 0.5;
+    });
+
+    // Kick-off renderer
+    (function animate() { // IIFE
+      // Frame cycle
+      tbControls.update();
+      renderer.render(scene, camera);
+      requestAnimationFrame(animate);
+    })();
+
+    // TODO: Fetch data from /api/v1/telemetry and add points/arcs to the Globe
+    async function updateFlights() {
+        try {
+            const response = await fetch('/api/v1/telemetry'); // Your API endpoint
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
+            const flights = await response.json();
+
+            // Example: Add points for each flight
+            const particlesData = flights.map(f => ({
+                lat: f.Latitude,
+                lng: f.Longitude,
+                alt: (f.BaroAltitude || f.GeoAltitude || 0) / 6378000, // divide by earth radius to get altitude    in earth radii
+                //color: 'red',
+                //label: f.Callsign || f.ICAO24
+            }));
+
+            console.log('Updating globe with particlesData:', JSON.stringify(particlesData, null, 2)); // Added logging
+
+            Globe.particlesData([particlesData]);
+
+        } catch (error) {
+            console.error("Failed to fetch or update flight data:", error);
+        }
+    }
+
+    // Initial load and periodic update
+    updateFlights();
+    setInterval(updateFlights, 15000); // Update every 15 seconds
+
+  </script>
+{{end}}
+

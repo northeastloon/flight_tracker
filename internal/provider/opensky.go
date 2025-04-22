@@ -1,4 +1,4 @@
-package fetch
+package provider
 
 import (
 	"context"
@@ -124,7 +124,10 @@ func ParseOpenSkyTelemetry(r OpenSkyResponse) ([]OpenSkyTelemetry, error) {
 	return parsed, nil
 }
 
-func (c *OpenSkyClient) FetchTelemetry(ctx context.Context) ([]domain.TelemetryRecord, error) {
+// Compile-time check that OpenSkyClient implements FlightDataProvider
+var _ domain.FlightDataProvider[[]OpenSkyTelemetry] = (*OpenSkyClient)(nil)
+
+func (c *OpenSkyClient) FetchTelemetry(ctx context.Context) ([]OpenSkyTelemetry, error) {
 	response, err := Fetch[OpenSkyResponse](ctx, c.Client)
 	if err != nil {
 		return nil, err
@@ -135,32 +138,5 @@ func (c *OpenSkyClient) FetchTelemetry(ctx context.Context) ([]domain.TelemetryR
 		return nil, err
 	}
 
-	var records []domain.TelemetryRecord
-	for _, rec := range parsed {
-		records = append(records, rec)
-	}
-	return records, nil
-}
-
-func (t OpenSkyTelemetry) ToDBRow() map[string]interface{} {
-	return map[string]any{
-		"icao24":          t.Icao24,
-		"callsign":        t.Callsign,
-		"origin_country":  t.OriginCountry,
-		"time_position":   t.TimePosition,
-		"last_contact":    t.LastContact,
-		"longitude":       t.Longitude,
-		"latitude":        t.Latitude,
-		"baro_altitude":   t.BaroAltitude,
-		"on_ground":       t.OnGround,
-		"velocity":        t.Velocity,
-		"true_track":      t.TrueTrack,
-		"vertical_rate":   t.VerticalRate,
-		"sensors":         t.Sensors,
-		"geo_altitude":    t.GeoAltitude,
-		"squawk":          t.Squawk,
-		"spi":             t.SPI,
-		"position_source": t.PositionSource,
-		"category":        t.Category,
-	}
+	return parsed, nil
 }
