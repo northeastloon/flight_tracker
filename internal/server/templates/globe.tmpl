@@ -21,7 +21,7 @@
     import { TrackballControls } from 'three/examples/jsm/controls/TrackballControls.js?external=three';
 
 
-    function createParticleTexture(color = 'rgba(255, 255, 255, 0.7)', size = 32) {
+    function createParticleTexture(color = 'rgb(255, 255, 255, 0.5)', size = 32) {
       const canvas = document.createElement('canvas');
       canvas.width = size;
       canvas.height = size;
@@ -41,7 +41,7 @@
     }
 
     // Create the texture once
-    const particleTexture = createParticleTexture('rgba(255, 200, 0, 1', 64); // Yellowish, s
+    const particleTexture = createParticleTexture('rgb(255, 200, 0, 0.5)' , 64); // Yellowish, s
 
     const Globe = new ThreeGlobe()
       .globeTileEngineUrl((x, y, z) =>
@@ -50,10 +50,14 @@
       ).particleLat('lat')
       .particleLng('lng')
       .particleAltitude('alt')
-      .particlesTexture(() => particleTexture)
+      //.particlesTexture(() => particleTexture)
       .particlesSize(() => 0.15) 
-      //.particlesColor('color')
-      //.particleLabel('label')
+      .pathPoints(p => p.map(pt => [pt.lat, pt.lng, pt.altitude]))
+      .pathColor(() => 'white')
+      .pathStroke(2)
+      .pathDashLength(0)
+      .pathTransitionDuration(0)
+      .pathResolution(0.1)
       ;
 
       try {
@@ -82,7 +86,11 @@
     const R = Globe.getGlobeRadius();
 
     // Setup renderer
-    const renderer = new THREE.WebGLRenderer();
+    const renderer = new THREE.WebGLRenderer({
+      antialias: true,
+      logarithmicDepthBuffer: true
+    });
+    renderer.sortObjects = true;
     renderer.setSize(window.innerWidth, window.innerHeight);
     renderer.setPixelRatio(window.devicePixelRatio);
     document.getElementById('globeViz').appendChild(renderer.domElement);
@@ -128,24 +136,112 @@
     // TODO: Fetch data from /api/v1/telemetry and add points/arcs to the Globe
     async function updateFlights() {
         try {
-            const response = await fetch('/api/v1/telemetry'); // Your API endpoint
+            const response = await fetch('/api/v1/telemetry'); // Fetches the flat array of all telemetry points
             if (!response.ok) {
                 throw new Error(`HTTP error! status: ${response.status}`);
             }
-            const flights = await response.json();
+            // flatTelemetryData is an array like: [{icao24: 'abc', Latitude: ..., Longitude: ..., ...}, {icao24: 'def', ...}, {icao24: 'abc', ...}]
+            const flatTelemetryData = await response.json();
 
-            // Example: Add points for each flight
-            const particlesData = flights.map(f => ({
-                lat: f.Latitude,
-                lng: f.Longitude,
-                alt: (f.BaroAltitude || f.GeoAltitude || 0) / 6378000, // divide by earth radius to get altitude    in earth radii
-                //color: 'red',
-                //label: f.Callsign || f.ICAO24
-            }));
+            // --- Group Telemetry Data by ICAO24 on the Frontend ---
+            const flightsGrouped = {}; // Use an object for efficient grouping
 
-            console.log('Updating globe with particlesData:', JSON.stringify(particlesData, null, 2)); // Added logging
+            flatTelemetryData.forEach(point => {
+                const icao = point.ICAO24;
+                if (!icao || point.Latitude == null || point.Longitude == null) return; // Skip points without ICAO or essential coords
 
-            Globe.particlesData([particlesData]);
+                if (!flightsGrouped[icao]) {
+                    flightsGrouped[icao] = {
+                        icao24: icao,
+                        callsign: point.Callsign, // Store callsign if needed
+                        origin_country: point.OriginCountry, // Store other static data if needed
+                        history: []
+                    };
+                }
+
+                // Convert timestamp string to Unix timestamp (seconds) for sorting
+                const timestamp = point.LastContact ? new Date(point.LastContact).getTime() / 1000 : 0;
+
+                const relativeAltitude = (point.BaroAltitude || point.GeoAltitude || 0) / 6378000;
+
+                // Add the point to the history for this flight
+                flightsGrouped[icao].history.push({
+                    latitude: point.Latitude,    // Corrected typo: latitude
+                    longitude: point.Longitude,  // Corrected typo: longitude
+                    relativeAltitude: relativeAltitude, // Use calculated relative altitude
+                    timestamp: timestamp,        // Store the NUMERIC timestamp for sorting
+                    // Include other point-specific data if needed later
+                });
+            });
+
+            // Convert the grouped object back into an array (the format expected by subsequent logic)
+            const flightsWithHistory = Object.values(flightsGrouped);
+
+            // --- Process data for Paths (Historical Tracks) ---
+            const pathsData = flightsWithHistory
+                .map(flight => {
+                    // Ensure history is sorted by timestamp
+                    const sortedHistory = flight.history.sort((a, b) => a.timestamp - b.timestamp);
+
+                    // Filter out flights with less than 2 points AFTER sorting
+                    if (sortedHistory.length < 2) {
+                        return null; // Will be filtered out later
+                    }
+
+                    // Map history points to {lat, lng, alt} objects for the path
+                    return sortedHistory.map(point => ({
+                        lat: point.latitude,          // Use correct field name
+                        lng: point.longitude,         // Use correct field name
+                        alt: point.relativeAltitude   // Corrected typo: Use relativeAltitude
+                    }));
+                })
+                .filter(path => path !== null); // Remove null entries from flights with < 2 points
+
+            // --- Process data for Particles (Latest Position) ---
+            const particlesData = flightsWithHistory
+                .map(flight => {
+                    const sortedHistory = flight.history.sort((a, b) => a.timestamp - b.timestamp);
+                    if (sortedHistory.length === 0) return null;
+                    
+                    const latestPoint = sortedHistory[sortedHistory.length - 1];
+                    
+                    // Validate coordinates to prevent NaN values
+                    if (isNaN(latestPoint.latitude) || isNaN(latestPoint.longitude) || isNaN(latestPoint.relativeAltitude)) {
+                        return null;
+                    }
+                    
+                    return {
+                        lat: latestPoint.latitude,
+                        lng: latestPoint.longitude,
+                        alt: latestPoint.relativeAltitude
+                    };
+                })
+                .filter(particle => particle !== null);
+
+
+            // --- Update Globe ---
+            // Update Paths
+            if (pathsData.length === 0) {
+                console.log("No path data to update.");
+                // Globe.pathsData([]); // Optionally clear existing paths
+            } else {
+                console.log(`Updating globe with ${pathsData.length} paths.`);
+                // Log the pathsData content here:
+                console.log('Paths Data:', JSON.stringify(pathsData.slice(0,20), null, 2)); // Pretty-print JSON
+                // console.log('Paths Data (raw object):', pathsData); // Alternative: log raw object
+
+                Globe.pathsData(pathsData); // Update only once
+            }
+
+            // Update Particles
+            if (particlesData.length === 0) {
+                 console.log("No particle data to update.");
+                // Globe.particlesData([]); // Optionally clear existing particles
+            } else {
+                 console.log(`Updating globe with ${particlesData.length} current aircraft particles.`);
+                // console.log('Particles data sample:', JSON.stringify(particlesData.slice(0, 5), null, 2));
+                Globe.particlesData(particlesData.length > 0 ? [particlesData] : []); // Update only once
+            }
 
         } catch (error) {
             console.error("Failed to fetch or update flight data:", error);

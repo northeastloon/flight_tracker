@@ -151,7 +151,8 @@ func (d *Database) MigrateDB() error {
 			spi, 
 			position_source,
 			category
-		FROM opensky;
+		FROM opensky
+		ORDER BY icao24, time_position DESC;
 
 	-- Optional indices
 	CREATE INDEX IF NOT EXISTS idx_opensky_icao_last_contact ON opensky (icao24, last_contact DESC);
