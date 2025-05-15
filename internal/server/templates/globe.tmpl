@@ -9,6 +9,12 @@
       "three/": "https://esm.sh/three/"
     }
   }</script>
+  <script>
+    // Add the globe-view class to the body when the page loads
+    document.addEventListener('DOMContentLoaded', function() {
+      document.body.classList.add('globe-view');
+    });
+  </script>
 {{end}}
 
 {{define "content"}}
@@ -16,242 +22,320 @@
 
   {{/* The main module script. Go's html/template is context-aware and safe for script tags. */}}
   <script type="module">
+    import * as THREE from 'three';
     import ThreeGlobe from 'https://esm.sh/three-globe?external=three';
-    import * as THREE from 'https://esm.sh/three';
     import { TrackballControls } from 'three/examples/jsm/controls/TrackballControls.js?external=three';
-
-
-    function createParticleTexture(color = 'rgb(255, 255, 255, 0.5)', size = 32) {
-      const canvas = document.createElement('canvas');
-      canvas.width = size;
-      canvas.height = size;
-      const context = canvas.getContext('2d');
-      const centerX = size / 2;
-      const centerY = size / 2;
-      const radius = size / 2;
-
-      context.beginPath();
-      context.arc(centerX, centerY, radius, 0, 2 * Math.PI, false);
-      context.fillStyle = color;
-      context.fill();
-
-      const texture = new THREE.CanvasTexture(canvas);
-      texture.needsUpdate = true; // Ensure texture updates
-      return texture;
-    }
-
-    // Create the texture once
-    const particleTexture = createParticleTexture('rgb(255, 200, 0, 0.5)' , 64); // Yellowish, s
-
-    const Globe = new ThreeGlobe()
-      .globeTileEngineUrl((x, y, z) =>
-        // Use backticks or escape the $ if needed, but should be fine here.
-        `https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/${z}/${y}/${x}`
-      ).particleLat('lat')
-      .particleLng('lng')
-      .particleAltitude('alt')
-      //.particlesTexture(() => particleTexture)
-      .particlesSize(() => 0.15) 
-      .pathPoints(p => p.map(pt => [pt.lat, pt.lng, pt.altitude]))
-      .pathColor(() => 'white')
-      .pathStroke(2)
-      .pathDashLength(0)
-      .pathTransitionDuration(0)
-      .pathResolution(0.1)
-      ;
-
-      try {
-        // Traverse the Globe object itself (assuming it's the THREE.Group)
-        Globe.traverse(object => {
-            // Find the Points object used for particles
-            if (object.isPoints) {
-                console.log("Found Points object, modifying material for transparency.");
-                const material = object.material;
-                if (material) {
-                    material.transparent = true;  // Enable transparency
-                    material.depthWrite = false; // Disable writing to depth buffer for proper blending
-                    material.alphaTest = 0;     // Disable alpha testing (rely on blending)
-                    // Optional: Ensure blending mode is suitable if needed
-                    // material.blending = THREE.NormalBlending;
-                    material.needsUpdate = true; // Signal material change
-                } else {
-                   console.warn("Points object found, but has no material.");
-                }
-            }
-        });
-    } catch (e) {
-        console.error("Error traversing Globe object or modifying material:", e);
-    }
-
-    const R = Globe.getGlobeRadius();
-
-    // Setup renderer
-    const renderer = new THREE.WebGLRenderer({
-      antialias: true,
-      logarithmicDepthBuffer: true
-    });
-    renderer.sortObjects = true;
-    renderer.setSize(window.innerWidth, window.innerHeight);
-    renderer.setPixelRatio(window.devicePixelRatio);
+    import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js?external=three';
+  
+    /* ────────────── constants ────────────── */
+    const EARTH_RADIUS_KM = 6371;
+    const POLL_MS         = 1000;
+    const MAX_AIRCRAFT    = 5000;
+    const PATH_SEGMENTS   = 20;
+    const SUB_SEGMENTS    = 5;
+    const ALT_SCALE       = 0.0001;
+    const VELOCITY_SCALE  = 1;          // 1 = real‑world speed (raise to exaggerate)
+    const BLEND_MS        = 300;
+    const MARKER_SIZE = 0.03;
+    
+  
+    /* ────────────── scene ────────────── */
+    const renderer = new THREE.WebGLRenderer({ antialias: true, logarithmicDepthBuffer: true });
+    renderer.setPixelRatio(devicePixelRatio);
+    renderer.setSize(innerWidth, innerHeight);
     document.getElementById('globeViz').appendChild(renderer.domElement);
-
-    // Setup scene
+  
     const scene = new THREE.Scene();
-    scene.add(Globe);
     scene.add(new THREE.AmbientLight(0xcccccc, Math.PI));
     scene.add(new THREE.DirectionalLight(0xffffff, 0.6 * Math.PI));
+  
+    const Globe = new ThreeGlobe()
+      .globeTileEngineUrl((x, y, z) =>
+        `https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/${z}/${y}/${x}`)
+      .globeTileEngineMaxLevel(6)
+      .globeMaterial(new THREE.MeshBasicMaterial({ color: 0x202020 }));
+    scene.add(Globe);
+  
+    const R      = Globe.getGlobeRadius();
+    const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 1, R * 100);
+    camera.position.z = R * 3;
 
-    // Setup camera
-    const camera = new THREE.PerspectiveCamera();
-    camera.aspect = window.innerWidth/window.innerHeight;
-    camera.near = 1e-3;
-    camera.far = R * 100;
-    camera.updateProjectionMatrix();
-    camera.position.z = 600;
+  
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enablePan      = false;   // <-- never translate
+    controls.enableDamping  = true;
+    controls.dampingFactor  = 0.15;
+    controls.minDistance = R * 1.1;
+    controls.maxDistance = R * 10;
 
-    // Add camera controls
-    const tbControls = new TrackballControls(camera, renderer.domElement);
-    tbControls.minDistance = R * (1 + 5 / 2**Globe.globeTileEngineMaxLevel());
-    tbControls.maxDistance = camera.far - R;
-    tbControls.rotateSpeed = 5;
-    tbControls.zoomSpeed = 0.8;
+    controls.addEventListener('change', () => Globe.setPointOfView(camera));
 
-    // Update pov when camera moves
-    Globe.setPointOfView(camera);
-    tbControls.addEventListener('change', () => {
-      Globe.setPointOfView(camera);
-      const distToSurface = camera.position.distanceTo(Globe.position) - R;
-      tbControls.rotateSpeed = distToSurface / R * 2.5;
-      tbControls.zoomSpeed = Math.sqrt(distToSurface / R) * 0.5;
+ 
+    /* ────────────── helpers ────────────── */
+    function latLonToVec3(lat, lon, alt = 0) {
+      const rad = R * (1 + (alt * ALT_SCALE) / EARTH_RADIUS_KM);
+      const φ = (90 - lat) * Math.PI / 180;
+      const θ = (lon + 180) * Math.PI / 180;
+      return new THREE.Vector3(
+        rad * Math.sin(φ) * Math.cos(θ),
+        rad * Math.cos(φ),
+        rad * Math.sin(φ) * Math.sin(θ)
+      );
+    }
+  
+    function predict(lat, lon, alt, vel, hdg, dt) {
+      const dKm = (vel * VELOCITY_SCALE * dt) / 1000;
+      const Rk  = EARTH_RADIUS_KM + (alt * ALT_SCALE);
+      const h   = hdg * Math.PI / 180;
+      const φ1  = lat * Math.PI / 180;
+      const λ1  = lon * Math.PI / 180;
+  
+      const φ2 = Math.asin(Math.sin(φ1) * Math.cos(dKm / Rk) +
+                           Math.cos(φ1) * Math.sin(dKm / Rk) * Math.cos(h));
+      const λ2 = λ1 + Math.atan2(
+                   Math.sin(h) * Math.sin(dKm / Rk) * Math.cos(φ1),
+                   Math.cos(dKm / Rk) - Math.sin(φ1) * Math.sin(φ2));
+      return { lat: φ2 * 180 / Math.PI, lon: λ2 * 180 / Math.PI, alt };
+    }
+  
+    function arcPts(a, b, n) {
+      const pts = [];
+      for (let i = 0; i <= n; i++)
+        pts.push(new THREE.Vector3().copy(a).lerp(b, i / n).normalize().multiplyScalar(a.length()));
+      return pts;
+    }
+  
+    /* timestamp parser: dd/mm/yyyy HH:MM(:ss) → epoch‑ms */
+    function toEpochMs(ts) {
+      if (ts == null) return NaN;
+      if (typeof ts === 'number') return ts * 1000;
+      const m = ts.match(/^(\d{2})\/(\d{2})\/(\d{4}) (\d{2}):(\d{2})(?::(\d{2}))?$/);
+      if (m) {
+        const [, d, M, y, h, mn, s] = m;
+        return Date.UTC(+y, +M - 1, +d, +h, +mn, s ? +s : 0);
+      }
+      const iso = Date.parse(ts);
+      return isNaN(iso) ? NaN : iso;
+    }
+  
+    /* ────────────── data stores ────────────── */
+    const planes    = new Map(); // icao24 → state
+    const histories = new Map(); // icao24 → [Vec3 …]
+  
+    /* ────────────── geometry ────────────── */
+    const arcBuf  = new Float32Array(MAX_AIRCRAFT * (PATH_SEGMENTS - 1) * 2 * 3);
+    const histBuf = new Float32Array(MAX_AIRCRAFT * 120 * SUB_SEGMENTS * 2 * 3);
+  
+    const arcGeom  = new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(arcBuf, 3));
+    const histGeom = new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(histBuf, 3));
+  
+    const livePathLines = new THREE.LineSegments(
+    arcGeom,
+    new THREE.LineBasicMaterial({ color: 0xffff00, opacity:.3, depthWrite:false,
+                                  transparent:true, linewidth:3 })
+    );
+    livePathLines.renderOrder = 1;
+    scene.add(livePathLines);
+ 
+    const histPathLines = new THREE.LineSegments(
+      histGeom,
+      new THREE.LineBasicMaterial({ color: 0xffff00, opacity:.4, transparent:true,
+                                  linewidth:1 })
+    );
+    histPathLines.renderOrder = 1;
+    scene.add(histPathLines);
+  
+    const particles = new THREE.InstancedMesh(
+      new THREE.SphereGeometry(.1, 8, 8),
+      new THREE.MeshBasicMaterial({ color: 'red', depthTest: true, depthWrite: false }),
+      MAX_AIRCRAFT
+    );
+    particles.renderOrder = 2;
+    scene.add(particles);
+
+    const markerBuf   = new Float32Array(MAX_AIRCRAFT * 120 * 3);  // x y z for each fix
+    const markerGeom  = new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(markerBuf, 3));
+
+    const markerMat   = new THREE.PointsMaterial({
+      color: 0xffffff,
+      size: MARKER_SIZE,
+      sizeAttenuation: true,
+      depthWrite: false
     });
 
-    // Kick-off renderer
-    (function animate() { // IIFE
-      // Frame cycle
-      tbControls.update();
-      renderer.render(scene, camera);
-      requestAnimationFrame(animate);
-    })();
+    const markers = new THREE.Points(markerGeom, markerMat);
+    markers.renderOrder = 1.5;          // above paths, below aircraft sphere
+    scene.add(markers);
 
-    // TODO: Fetch data from /api/v1/telemetry and add points/arcs to the Globe
-    async function updateFlights() {
-        try {
-            const response = await fetch('/api/v1/telemetry'); // Fetches the flat array of all telemetry points
-            if (!response.ok) {
-                throw new Error(`HTTP error! status: ${response.status}`);
-            }
-            // flatTelemetryData is an array like: [{icao24: 'abc', Latitude: ..., Longitude: ..., ...}, {icao24: 'def', ...}, {icao24: 'abc', ...}]
-            const flatTelemetryData = await response.json();
+    let pathsVisible = true;
+    const toggleBtn  = document.getElementById('togglePathsBtn');
 
-            // --- Group Telemetry Data by ICAO24 on the Frontend ---
-            const flightsGrouped = {}; // Use an object for efficient grouping
+    toggleBtn.addEventListener('click', () => {
+      pathsVisible = !pathsVisible;
 
-            flatTelemetryData.forEach(point => {
-                const icao = point.ICAO24;
-                if (!icao || point.Latitude == null || point.Longitude == null) return; // Skip points without ICAO or essential coords
+      livePathLines.visible  = pathsVisible;
+      histPathLines.visible  = pathsVisible;
+      markers.visible        = pathsVisible;
 
-                if (!flightsGrouped[icao]) {
-                    flightsGrouped[icao] = {
-                        icao24: icao,
-                        callsign: point.Callsign, // Store callsign if needed
-                        origin_country: point.OriginCountry, // Store other static data if needed
-                        history: []
-                    };
-                }
-
-                // Convert timestamp string to Unix timestamp (seconds) for sorting
-                const timestamp = point.LastContact ? new Date(point.LastContact).getTime() / 1000 : 0;
-
-                const relativeAltitude = (point.BaroAltitude || point.GeoAltitude || 0) / 6378000;
-
-                // Add the point to the history for this flight
-                flightsGrouped[icao].history.push({
-                    latitude: point.Latitude,    // Corrected typo: latitude
-                    longitude: point.Longitude,  // Corrected typo: longitude
-                    relativeAltitude: relativeAltitude, // Use calculated relative altitude
-                    timestamp: timestamp,        // Store the NUMERIC timestamp for sorting
-                    // Include other point-specific data if needed later
-                });
+      toggleBtn.textContent = pathsVisible ? 'Hide Paths' : 'Show Paths';
+    });
+  
+    /* ────────────── polling ────────────── */
+    async function poll() {
+      try {
+        const res = await fetch('/api/v1/telemetry');
+        if (!res.ok) throw new Error(res.status);
+        const data = await res.json();
+        const now  = Date.now();          // epoch‑ms
+  
+        data.forEach(pkt => {
+          if (!pkt.ICAO24 || pkt.Latitude == null || pkt.Longitude == null) return;
+  
+          /* -------- timestamp -------- */
+          let pktMs;
+          if (typeof pkt.LastContact === 'number') {
+            pktMs = pkt.LastContact * 1000;                  // seconds → ms
+          } else if (pkt.TimePosition != null) {
+            pktMs = toEpochMs(pkt.TimePosition);
+            if (!Number.isFinite(pktMs)) pktMs = now;        // parser failed
+          } else {
+            pktMs = now;                                     // no time info at all
+          }
+  
+          /* -------- position & motion -------- */
+          const alt  = pkt.BaroAltitude ?? pkt.GeoAltitude ?? 0;
+          const posV = latLonToVec3(pkt.Latitude, pkt.Longitude, alt);
+  
+          if (!planes.has(pkt.ICAO24)) {
+            /* new aircraft */
+            planes.set(pkt.ICAO24, {
+              lat: pkt.Latitude,
+              lon: pkt.Longitude,
+              alt,
+              vel: pkt.Velocity ?? 0,
+              hdg: pkt.TrueTrack ?? 0,
+              pktMs,
+              seenMs: now,
+              snapStart: posV,
+              snapEnd:   posV,
+              snapStartMs: now
             });
-
-            // Convert the grouped object back into an array (the format expected by subsequent logic)
-            const flightsWithHistory = Object.values(flightsGrouped);
-
-            // --- Process data for Paths (Historical Tracks) ---
-            const pathsData = flightsWithHistory
-                .map(flight => {
-                    // Ensure history is sorted by timestamp
-                    const sortedHistory = flight.history.sort((a, b) => a.timestamp - b.timestamp);
-
-                    // Filter out flights with less than 2 points AFTER sorting
-                    if (sortedHistory.length < 2) {
-                        return null; // Will be filtered out later
-                    }
-
-                    // Map history points to {lat, lng, alt} objects for the path
-                    return sortedHistory.map(point => ({
-                        lat: point.latitude,          // Use correct field name
-                        lng: point.longitude,         // Use correct field name
-                        alt: point.relativeAltitude   // Corrected typo: Use relativeAltitude
-                    }));
-                })
-                .filter(path => path !== null); // Remove null entries from flights with < 2 points
-
-            // --- Process data for Particles (Latest Position) ---
-            const particlesData = flightsWithHistory
-                .map(flight => {
-                    const sortedHistory = flight.history.sort((a, b) => a.timestamp - b.timestamp);
-                    if (sortedHistory.length === 0) return null;
-                    
-                    const latestPoint = sortedHistory[sortedHistory.length - 1];
-                    
-                    // Validate coordinates to prevent NaN values
-                    if (isNaN(latestPoint.latitude) || isNaN(latestPoint.longitude) || isNaN(latestPoint.relativeAltitude)) {
-                        return null;
-                    }
-                    
-                    return {
-                        lat: latestPoint.latitude,
-                        lng: latestPoint.longitude,
-                        alt: latestPoint.relativeAltitude
-                    };
-                })
-                .filter(particle => particle !== null);
-
-
-            // --- Update Globe ---
-            // Update Paths
-            if (pathsData.length === 0) {
-                console.log("No path data to update.");
-                // Globe.pathsData([]); // Optionally clear existing paths
-            } else {
-                console.log(`Updating globe with ${pathsData.length} paths.`);
-                // Log the pathsData content here:
-                console.log('Paths Data:', JSON.stringify(pathsData.slice(0,20), null, 2)); // Pretty-print JSON
-                // console.log('Paths Data (raw object):', pathsData); // Alternative: log raw object
-
-                Globe.pathsData(pathsData); // Update only once
-            }
-
-            // Update Particles
-            if (particlesData.length === 0) {
-                 console.log("No particle data to update.");
-                // Globe.particlesData([]); // Optionally clear existing particles
-            } else {
-                 console.log(`Updating globe with ${particlesData.length} current aircraft particles.`);
-                // console.log('Particles data sample:', JSON.stringify(particlesData.slice(0, 5), null, 2));
-                Globe.particlesData(particlesData.length > 0 ? [particlesData] : []); // Update only once
-            }
-
-        } catch (error) {
-            console.error("Failed to fetch or update flight data:", error);
-        }
+            histories.set(pkt.ICAO24, [posV]);
+            return;
+          }
+  
+          const p = planes.get(pkt.ICAO24);
+          p.seenMs = now;
+  
+          if (pkt.Velocity   != null) p.vel = pkt.Velocity;
+          if (pkt.TrueTrack  != null) p.hdg = pkt.TrueTrack;
+  
+          if (pktMs > p.pktMs) {
+            /* newer telemetry — update authoritative state */
+            p.lat = pkt.Latitude; p.lon = pkt.Longitude; p.alt = alt; p.pktMs = pktMs;
+  
+            p.snapStart   = predict(p.lat, p.lon, p.alt, p.vel, p.hdg, (now - pktMs) / 1000);
+            p.snapEnd     = posV;
+            p.snapStartMs = now;
+  
+            const h = histories.get(pkt.ICAO24);
+            h.push(posV); if (h.length > 120) h.shift();
+          }
+        });
+  
+        /* purge stale aircraft */
+        for (const [id, p] of planes)
+          if (now - p.seenMs > 30_000) { planes.delete(id); histories.delete(id); }
+  
+      } catch (e) { console.error('poll', e); }
     }
+  
+    /* ────────────── render loop ────────────── */
+    function animate() {
+      requestAnimationFrame(animate);
+      const now = Date.now();        // epoch‑ms
+  
+      arcBuf.fill(0);
+      histBuf.fill(0);
+      markerBuf.fill(0);
+      let idx = 0, ptr = 0, markPtr = 0;
+  
+      planes.forEach((p, id) => {
+        if (idx >= MAX_AIRCRAFT) return;
+  
+        /* predicted position */
+        let dt = (now - p.pktMs) / 1000;
+        if (!Number.isFinite(dt) || dt < 0) dt = 0;
+  
+        const hasMotion = p.vel > 0 && Number.isFinite(p.vel) &&
+                          p.hdg != null && Number.isFinite(p.hdg);
+  
+        let cur = (hasMotion && dt > 0)
+          ? latLonToVec3(...Object.values(predict(p.lat, p.lon, p.alt, p.vel, p.hdg, dt)))
+          : latLonToVec3(p.lat, p.lon, p.alt);
+  
+        /* blend in new telemetry smoothly */
+        if (now - p.snapStartMs < BLEND_MS) {
+          const t = (now - p.snapStartMs) / BLEND_MS;
+          cur = new THREE.Vector3().copy(p.snapStart).lerp(p.snapEnd, t);
+        }
+  
+        particles.setMatrixAt(idx, new THREE.Matrix4().setPosition(cur));
+  
+        /* history path */
+        const hist = histories.get(id) ?? [];
+        for (let i = 0; i < hist.length - 1; i++) {
+          const leg = arcPts(hist[i], hist[i + 1], SUB_SEGMENTS);
+          for (let j = 0; j < leg.length - 1 && ptr + 5 < histBuf.length; j++) {
+            histBuf.set(leg[j].toArray(), ptr);   ptr += 3;
+            histBuf.set(leg[j + 1].toArray(), ptr); ptr += 3;
+          }
+        }
 
-    // Initial load and periodic update
-    updateFlights();
-    setInterval(updateFlights, 15000); // Update every 15 seconds
+        for (let i = 0; i < hist.length && markPtr + 2 < markerBuf.length; i++) {
+          markerBuf.set(hist[i].toArray(), markPtr);
+          markPtr += 3;
+        }
+  
+        /* live tail */
+        if (hist.length) {
+          const tail = arcPts(hist[hist.length - 1], cur, PATH_SEGMENTS);
+          for (let j = 0; j < PATH_SEGMENTS - 1; j++) {
+            const base = (idx * (PATH_SEGMENTS - 1) * 2 + j * 2) * 3;
+            arcBuf.set(tail[j].toArray(),     base);
+            arcBuf.set(tail[j + 1].toArray(), base + 3);
+          }
+        }
+  
+        idx++;
+      });
+  
+      /* tell Three.js how many vertices/instances are valid */
+      particles.count = idx;
+      arcGeom.setDrawRange(0, idx * (PATH_SEGMENTS - 1) * 2);
+      histGeom.setDrawRange(0, ptr / 3);
+      markerGeom.setDrawRange(0, markPtr / 3);          // number of vertices
+  
+      arcGeom.attributes.position.needsUpdate  = true;
+      histGeom.attributes.position.needsUpdate = true;
+      particles.instanceMatrix.needsUpdate     = true;
+      markerGeom.attributes.position.needsUpdate = true;
 
+      controls.update();
+      renderer.render(scene, camera);
+    }
+  
+    /* ────────────── bootstrap ────────────── */
+    animate();
+    poll(); setInterval(poll, POLL_MS);
+  
+    addEventListener('resize', () => {
+      camera.aspect = innerWidth / innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(innerWidth, innerHeight);
+    });
   </script>
+  
+  
 {{end}}
 
