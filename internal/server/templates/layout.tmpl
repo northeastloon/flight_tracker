@@ -1,12 +1,279 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{{block "title" .}}Default Title{{end}}</title>
+    <title>{{block "title" .}}Flight Tracker 3D{{end}}</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
+    <style>
+
+    nav input,
+    nav select,
+    nav textarea {
+        margin: 0 !important;          
+        width: auto !important;     
+        display: inline-block !important;
+    }
+
+        :root {
+            --sidebar-width: 300px;
+            --nav-height: 50px;
+            --primary: #1a1a1a;
+            --primary-hover: #2a2a2a;
+        }
+        
+        body {
+            display: grid;
+            grid-template-areas:
+                "nav nav"
+                "sidebar main";
+            grid-template-columns: var(--sidebar-width) 1fr;
+            grid-template-rows: auto 1fr;
+            min-height: 100vh;
+            margin: 0;
+            background: #000;
+            color: #fff;
+        }
+
+        nav {
+            grid-area: nav;
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            z-index: 100;
+            background: var(--primary);
+            border-bottom: 1px solid #333;
+            padding: 0 1rem;
+            height: var(--nav-height);
+            display: flex;
+            align-items: center;
+            box-sizing: border-box;
+        }
+
+        .nav-container {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            max-width: 100%;
+            margin: 0 auto;
+            width: 100%;
+            height: 100%;
+        }
+
+        .nav-left {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            height: 100%;
+        }
+
+        .nav-left strong {
+            font-size: 13px;
+            font-weight: 600;
+            white-space: nowrap;
+            line-height: var(--nav-height);
+        }
+
+        .nav-right {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+        }
+
+        .search-box {
+            align-self: center; 
+            background: #333;
+            border: 1px solid #444;
+            color: #fff;
+            padding: 0 0.5rem;
+            border-radius: 3px;
+            width: 180px;
+            height: 18px !important;
+            min-height: 18px !important;
+            max-height: 18px !important;
+            font-size: 11px;
+            line-height: 18px;
+            box-sizing: border-box;
+            margin: 0;
+            display: inline-block;
+            overflow: hidden;
+            vertical-align: middle;
+            margin-block:0;
+            align-self:center; 
+        }
+
+        .search-box::placeholder {
+            color: #888;
+            font-size: 11px;
+            line-height: 18px;
+        }
+
+        aside {
+            grid-area: sidebar;
+            position: fixed;
+            top: var(--nav-height);
+            left: 0;
+            bottom: 0;
+            width: var(--sidebar-width);
+            background: var(--primary);
+            border-right: 1px solid #333;
+            transform: translateX(-100%);
+            transition: transform 0.3s ease;
+            z-index: 90;
+        }
+
+        aside.visible {
+            transform: translateX(0);
+        }
+
+        main {
+            grid-area: main;
+            margin-top: var(--nav-height);
+            padding: 0 1rem 1rem;
+            position: relative;
+        }
+
+        /* Control buttons */
+        .control-btn {
+            background: #222;
+            color: #fff;
+            border: none;
+            border-radius: 3px;
+            padding: 0 8px;
+            font-size: 12px;
+            cursor: pointer;
+            transition: background 0.2s;
+            height: 20px;
+            line-height: 20px;
+            box-sizing: border-box;
+        }
+
+        .control-btn:hover {
+            background: #333;
+        }
+
+        /* Sidebar toggle button */
+        .sidebar-toggle {
+            background: none;
+            border: none;
+            color: #fff;
+            font-size: 1rem;
+            cursor: pointer;
+            padding: 0;
+            height: 20px;
+            line-height: 20px;
+            display: flex;
+            align-items: center;
+            margin: 0;
+        }
+
+        /* Mobile responsive */
+        @media (max-width: 768px) {
+            body {
+                grid-template-columns: 1fr;
+            }
+            
+            .search-box {
+                width: 150px;
+            }
+        }
+
+        main > *:first-child {
+            margin-top: 0;
+        }
+
+        nav { border-bottom: none; } 
+
+        /* Globe specific styling */
+        #globeViz {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            margin-top: 0;
+        }
+
+        /* When globe is rendered, remove main padding and margin */
+        body.globe-view main {
+            padding: 0;
+            margin: 0;
+        }
+
+    </style>
     {{block "head_extra" .}}{{end}}
 </head>
 <body>
-    {{block "content" .}}{{end}}
+    <!-- Top Navigation -->
+    <nav>
+        <div class="nav-container">
+            <div class="nav-left">
+                <button class="sidebar-toggle" onclick="toggleSidebar()">☰</button>
+                <strong>Flight Tracker 3D</strong>
+                <input type="search" class="search-box" placeholder="Search ICAO..." id="icaoSearch">
+            </div>
+            <div class="nav-right">
+                <button class="control-btn" id="togglePathsBtn">Hide Paths</button>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Sidebar -->
+    <aside id="sidebar">
+        <div style="padding: 1rem;">
+            <h3>Flight Filters</h3>
+            <nav>
+                <ul>
+                    <li><a href="#active">Active Flights</a></li>
+                    <li><a href="#altitude">Altitude Range</a></li>
+                    <li><a href="#speed">Speed Range</a></li>
+                    <li><hr></li>
+                    <li><a href="#bookmarks">Bookmarks</a></li>
+                    <li><a href="#settings">Settings</a></li>
+                </ul>
+            </nav>
+        </div>
+    </aside>
+
+    <!-- Main Content -->
+    <main>
+        {{block "content" .}}{{end}}
+    </main>
+
+    <script>
+        // Sidebar toggle
+        function toggleSidebar() {
+            const sidebar = document.getElementById('sidebar');
+            sidebar.classList.toggle('visible');
+        }
+
+        // Path toggle
+        const togglePathsBtn = document.getElementById('togglePathsBtn');
+        let pathsVisible = true;
+        
+        togglePathsBtn.addEventListener('click', () => {
+            pathsVisible = !pathsVisible;
+            togglePathsBtn.textContent = pathsVisible ? 'Hide Paths' : 'Show Paths';
+            // Add your path visibility toggle logic here
+        });
+
+        // ICAO search
+        const icaoSearch = document.getElementById('icaoSearch');
+        icaoSearch.addEventListener('input', (e) => {
+            // Add your ICAO search logic here
+            console.log('Searching for:', e.target.value);
+        });
+
+        // Close sidebar when clicking outside
+        document.addEventListener('click', (e) => {
+            const sidebar = document.getElementById('sidebar');
+            const sidebarToggle = document.querySelector('.sidebar-toggle');
+            
+            if (!sidebar.contains(e.target) && !sidebarToggle.contains(e.target)) {
+                sidebar.classList.remove('visible');
+            }
+        });
+    </script>
 </body>
 </html>
