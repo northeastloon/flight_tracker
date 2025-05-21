@@ -24,315 +24,394 @@
   <script type="module">
     import * as THREE from 'three';
     import ThreeGlobe from 'https://esm.sh/three-globe?external=three';
-    import { TrackballControls } from 'three/examples/jsm/controls/TrackballControls.js?external=three';
     import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js?external=three';
   
-    /* ────────────── constants ────────────── */
+    /* ───────── constants ───────── */
     const EARTH_RADIUS_KM = 6371;
     const POLL_MS         = 1000;
     const MAX_AIRCRAFT    = 5000;
-    const PATH_SEGMENTS   = 20;
-    const SUB_SEGMENTS    = 5;
+    const PATH_SEGMENTS   = 10;       // lighter
+    const SUB_SEGMENTS    = 3;
     const ALT_SCALE       = 0.0001;
-    const VELOCITY_SCALE  = 1;          // 1 = real‑world speed (raise to exaggerate)
+    const VELOCITY_SCALE  = 1;
     const BLEND_MS        = 300;
-    const MARKER_SIZE = 0.03;
-    
+    const MARKER_SIZE     = 0.03;
+    const MAX_HISTORY     = 1000;       // ≤ 60 fixes per aircraft
+    const UPDATE_MS       = 33;       // ≈30 Hz geometry refresh
   
-    /* ────────────── scene ────────────── */
-    const renderer = new THREE.WebGLRenderer({ antialias: true, logarithmicDepthBuffer: true });
+    /* ───────── scene ───────── */
+    const renderer = new THREE.WebGLRenderer({ antialias:true, logarithmicDepthBuffer:true });
     renderer.setPixelRatio(devicePixelRatio);
     renderer.setSize(innerWidth, innerHeight);
     document.getElementById('globeViz').appendChild(renderer.domElement);
   
     const scene = new THREE.Scene();
-    scene.add(new THREE.AmbientLight(0xcccccc, Math.PI));
-    scene.add(new THREE.DirectionalLight(0xffffff, 0.6 * Math.PI));
+    scene.add(new THREE.AmbientLight(0xcccccc,Math.PI));
+    scene.add(new THREE.DirectionalLight(0xffffff,0.6*Math.PI));
   
     const Globe = new ThreeGlobe()
-      .globeTileEngineUrl((x, y, z) =>
+      .globeTileEngineUrl((x,y,z)=>
         `https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/${z}/${y}/${x}`)
       .globeTileEngineMaxLevel(6)
-      .globeMaterial(new THREE.MeshBasicMaterial({ color: 0x202020 }));
+      .globeMaterial(new THREE.MeshBasicMaterial({color:0x202020}));
     scene.add(Globe);
+    
   
     const R      = Globe.getGlobeRadius();
-    const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 1, R * 100);
-    camera.position.z = R * 3;
-
+    const camera = new THREE.PerspectiveCamera(60, innerWidth/innerHeight, 1, R*100);
+    camera.position.z = R * 3;  
   
     const controls = new OrbitControls(camera, renderer.domElement);
-    controls.enablePan      = false;   // <-- never translate
+    controls.enablePan      = false;
     controls.enableDamping  = true;
     controls.dampingFactor  = 0.15;
-    controls.minDistance = R * 1.1;
-    controls.maxDistance = R * 10;
-
-    controls.addEventListener('change', () => Globe.setPointOfView(camera));
-
- 
-    /* ────────────── helpers ────────────── */
-    function latLonToVec3(lat, lon, alt = 0) {
-      const rad = R * (1 + (alt * ALT_SCALE) / EARTH_RADIUS_KM);
-      const φ = (90 - lat) * Math.PI / 180;
-      const θ = (lon + 180) * Math.PI / 180;
-      return new THREE.Vector3(
-        rad * Math.sin(φ) * Math.cos(θ),
-        rad * Math.cos(φ),
-        rad * Math.sin(φ) * Math.sin(θ)
-      );
+    controls.minDistance    = R*1.01;
+    controls.maxDistance    = R*10;
+    controls.addEventListener('change',()=>Globe.setPointOfView(camera));
+  
+    /* ───────── helpers ───────── */
+    function latLonToVec3(lat,lon,alt=0){
+      const rad = R*(1+(alt*ALT_SCALE)/EARTH_RADIUS_KM);
+      const φ = (90-lat)*Math.PI/180, θ = (90-lon)*Math.PI/180;
+      scratch.set(
+        rad*Math.sin(φ)*Math.cos(θ),
+        rad*Math.cos(φ),
+      rad*Math.sin(φ)*Math.sin(θ)
+    );
+    return scratch.clone();          // return a copy, keep scratch for reuse
     }
-  
-    function predict(lat, lon, alt, vel, hdg, dt) {
-      const dKm = (vel * VELOCITY_SCALE * dt) / 1000;
-      const Rk  = EARTH_RADIUS_KM + (alt * ALT_SCALE);
-      const h   = hdg * Math.PI / 180;
-      const φ1  = lat * Math.PI / 180;
-      const λ1  = lon * Math.PI / 180;
-  
-      const φ2 = Math.asin(Math.sin(φ1) * Math.cos(dKm / Rk) +
-                           Math.cos(φ1) * Math.sin(dKm / Rk) * Math.cos(h));
-      const λ2 = λ1 + Math.atan2(
-                   Math.sin(h) * Math.sin(dKm / Rk) * Math.cos(φ1),
-                   Math.cos(dKm / Rk) - Math.sin(φ1) * Math.sin(φ2));
-      return { lat: φ2 * 180 / Math.PI, lon: λ2 * 180 / Math.PI, alt };
-    }
-  
-    function arcPts(a, b, n) {
+
+    function arcPts(a, b, segs) {
       const pts = [];
-      for (let i = 0; i <= n; i++)
-        pts.push(new THREE.Vector3().copy(a).lerp(b, i / n).normalize().multiplyScalar(a.length()));
+      for (let i = 0; i <= segs; i++) {
+       pts.push(
+        scratch.copy(a).lerp(b, i / segs).normalize().multiplyScalar(a.length())
+       );
+      }
       return pts;
     }
   
-    /* timestamp parser: dd/mm/yyyy HH:MM(:ss) → epoch‑ms */
-    function toEpochMs(ts) {
-      if (ts == null) return NaN;
-      if (typeof ts === 'number') return ts * 1000;
-      const m = ts.match(/^(\d{2})\/(\d{2})\/(\d{4}) (\d{2}):(\d{2})(?::(\d{2}))?$/);
-      if (m) {
-        const [, d, M, y, h, mn, s] = m;
-        return Date.UTC(+y, +M - 1, +d, +h, +mn, s ? +s : 0);
-      }
-      const iso = Date.parse(ts);
-      return isNaN(iso) ? NaN : iso;
+    function predict(lat,lon,alt,vel,hdg,dt){
+      const dKm = (vel*VELOCITY_SCALE*dt)/1000;
+      const Rk  = EARTH_RADIUS_KM+(alt*ALT_SCALE);
+      const h   = hdg*Math.PI/180, φ1=lat*Math.PI/180, λ1=lon*Math.PI/180;
+      const φ2 = Math.asin(Math.sin(φ1)*Math.cos(dKm/Rk)+
+                            Math.cos(φ1)*Math.sin(dKm/Rk)*Math.cos(h));
+      const λ2 = λ1+Math.atan2(
+                   Math.sin(h)*Math.sin(dKm/Rk)*Math.cos(φ1),
+                   Math.cos(dKm/Rk)-Math.sin(φ1)*Math.sin(φ2));
+      return {lat:φ2*180/Math.PI, lon:λ2*180/Math.PI, alt};
     }
   
-    /* ────────────── data stores ────────────── */
-    const planes    = new Map(); // icao24 → state
-    const histories = new Map(); // icao24 → [Vec3 …]
+    /* timestamp parser */
+    function toEpochMs(ts){
+      if(ts==null) return NaN;
+      if(typeof ts==='number') return ts*1000;
+      const m=ts.match(/^(\d{2})\/(\d{2})\/(\d{4}) (\d{2}):(\d{2})(?::(\d{2}))?$/);
+      if(m){const[,d,M,y,h,mn,s]=m;return Date.UTC(+y,+M-1,+d,+h,+mn,s?+s:0);}
+      const iso=Date.parse(ts); return isNaN(iso)?NaN:iso;
+    }
   
-    /* ────────────── geometry ────────────── */
-    const arcBuf  = new Float32Array(MAX_AIRCRAFT * (PATH_SEGMENTS - 1) * 2 * 3);
-    const histBuf = new Float32Array(MAX_AIRCRAFT * 120 * SUB_SEGMENTS * 2 * 3);
+    /* ───────── data stores ───────── */
+    const planes    = new Map();
+    const histories = new Map();
+    const scratch   = new THREE.Vector3();   // reusable temp Vec3
   
-    const arcGeom  = new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(arcBuf, 3));
-    const histGeom = new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(histBuf, 3));
+    /* ───────── geometry buffers ───────── */
+    const arcBuf  = new Float32Array(MAX_AIRCRAFT*(PATH_SEGMENTS-1)*2*3);
+    const histBuf = new Float32Array(MAX_AIRCRAFT*MAX_HISTORY*SUB_SEGMENTS*2*3);
+    const markerBuf = new Float32Array(MAX_AIRCRAFT*MAX_HISTORY*3);
   
-    const livePathLines = new THREE.LineSegments(
-    arcGeom,
-    new THREE.LineBasicMaterial({ color: 0xffff00, opacity:.3, depthWrite:false,
-                                  transparent:true, linewidth:3 })
-    );
-    livePathLines.renderOrder = 1;
-    scene.add(livePathLines);
- 
-    const histPathLines = new THREE.LineSegments(
-      histGeom,
-      new THREE.LineBasicMaterial({ color: 0xffff00, opacity:.4, transparent:true,
-                                  linewidth:1 })
-    );
-    histPathLines.renderOrder = 1;
-    scene.add(histPathLines);
+    const arcGeom   = new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(arcBuf,3));
+    const histGeom  = new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(histBuf,3));
+    const markerGeom= new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(markerBuf,3));
+  
+    const livePathLines = new THREE.LineSegments(arcGeom,
+      new THREE.LineBasicMaterial({color:0xffff00,opacity:.3,transparent:true,depthWrite:false}));
+    const histPathLines = new THREE.LineSegments(histGeom,
+      new THREE.LineBasicMaterial({color:0xffff00,opacity:.4,transparent:true,depthWrite:false}));
+    livePathLines.renderOrder = histPathLines.renderOrder = 1;
+    scene.add(livePathLines); scene.add(histPathLines);
+
   
     const particles = new THREE.InstancedMesh(
-      new THREE.SphereGeometry(.1, 8, 8),
-      new THREE.MeshBasicMaterial({ color: 'red', depthTest: true, depthWrite: false }),
+      new THREE.SphereGeometry(.1,8,8),
+      new THREE.MeshBasicMaterial({color:'red',depthWrite:false}),
       MAX_AIRCRAFT
     );
-    particles.renderOrder = 2;
-    scene.add(particles);
-
-    const markerBuf   = new Float32Array(MAX_AIRCRAFT * 120 * 3);  // x y z for each fix
-    const markerGeom  = new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(markerBuf, 3));
-
-    const markerMat   = new THREE.PointsMaterial({
-      color: 0xffffff,
-      size: MARKER_SIZE,
-      sizeAttenuation: true,
-      depthWrite: false
-    });
-
-    const markers = new THREE.Points(markerGeom, markerMat);
-    markers.renderOrder = 1.5;          // above paths, below aircraft sphere
-    scene.add(markers);
-
-    let pathsVisible = true;
-    const toggleBtn  = document.getElementById('togglePathsBtn');
-
-    toggleBtn.addEventListener('click', () => {
-      pathsVisible = !pathsVisible;
-
-      livePathLines.visible  = pathsVisible;
-      histPathLines.visible  = pathsVisible;
-      markers.visible        = pathsVisible;
-
-      toggleBtn.textContent = pathsVisible ? 'Hide Paths' : 'Show Paths';
-    });
+    particles.renderOrder = 2; scene.add(particles);
   
-    /* ────────────── polling ────────────── */
+    const markers = new THREE.Points(markerGeom,
+      new THREE.PointsMaterial({color:0xffffff,size:MARKER_SIZE,sizeAttenuation:true,depthWrite:false}));
+    markers.renderOrder = 1.5; scene.add(markers);
+
+    Globe.add(livePathLines, histPathLines, markers, particles);
+  
+    /* ───────── UI toggle (optional) ───────── */
+    const toggleBtn = document.getElementById('togglePathsBtn');
+    let pathsVisible = true;
+    if (toggleBtn){
+      toggleBtn.addEventListener('click',()=>{
+        pathsVisible = !pathsVisible;
+        livePathLines.visible = histPathLines.visible =
+        markers.visible       = pathsVisible;
+        toggleBtn.textContent = pathsVisible?'Hide Paths':'Show Paths';
+      });
+    }
+
+    const scratchVec = new THREE.Vector3();
+    const scratchMat = new THREE.Matrix4();
+  
+    /* ───────── polling ───────── */
+    let firstPoll = true;  
+
     async function poll() {
       try {
-        const res = await fetch('/api/v1/telemetry');
-        if (!res.ok) throw new Error(res.status);
-        const data = await res.json();
-        const now  = Date.now();          // epoch‑ms
-  
-        data.forEach(pkt => {
-          if (!pkt.ICAO24 || pkt.Latitude == null || pkt.Longitude == null) return;
-  
-          /* -------- timestamp -------- */
-          let pktMs;
-          if (typeof pkt.LastContact === 'number') {
-            pktMs = pkt.LastContact * 1000;                  // seconds → ms
-          } else if (pkt.TimePosition != null) {
-            pktMs = toEpochMs(pkt.TimePosition);
-            if (!Number.isFinite(pktMs)) pktMs = now;        // parser failed
-          } else {
-            pktMs = now;                                     // no time info at all
-          }
-  
-          /* -------- position & motion -------- */
-          const alt  = pkt.BaroAltitude ?? pkt.GeoAltitude ?? 0;
-          const posV = latLonToVec3(pkt.Latitude, pkt.Longitude, alt);
-  
-          if (!planes.has(pkt.ICAO24)) {
-            /* new aircraft */
-            planes.set(pkt.ICAO24, {
-              lat: pkt.Latitude,
-              lon: pkt.Longitude,
-              alt,
-              vel: pkt.Velocity ?? 0,
-              hdg: pkt.TrueTrack ?? 0,
-              pktMs,
-              seenMs: now,
-              snapStart: posV,
-              snapEnd:   posV,
-              snapStartMs: now
-            });
-            histories.set(pkt.ICAO24, [posV]);
-            return;
-          }
-  
-          const p = planes.get(pkt.ICAO24);
-          p.seenMs = now;
-  
-          if (pkt.Velocity   != null) p.vel = pkt.Velocity;
-          if (pkt.TrueTrack  != null) p.hdg = pkt.TrueTrack;
-  
-          if (pktMs > p.pktMs) {
-            /* newer telemetry — update authoritative state */
-            p.lat = pkt.Latitude; p.lon = pkt.Longitude; p.alt = alt; p.pktMs = pktMs;
-  
-            p.snapStart   = predict(p.lat, p.lon, p.alt, p.vel, p.hdg, (now - pktMs) / 1000);
-            p.snapEnd     = posV;
-            p.snapStartMs = now;
-  
-            const h = histories.get(pkt.ICAO24);
-            h.push(posV); if (h.length > 120) h.shift();
-          }
+      const url = firstPoll
+        ? '/api/v1/telemetry'
+        : '/api/v1/telemetry?latest=true';
+
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(res.status);
+
+      const text = await res.text();
+      if (!text.trim()) return;                     // empty payload
+
+      const rows = JSON.parse(text);                // array of telemetry objects
+      const now  = Date.now();
+
+      /* 1️⃣  group rows by ICAO24 */
+      const byIcao = new Map();
+      for (const pkt of rows) {
+        if (!pkt.ICAO24 || pkt.Latitude == null || pkt.Longitude == null) continue;
+        if (!byIcao.has(pkt.ICAO24)) byIcao.set(pkt.ICAO24, []);
+        byIcao.get(pkt.ICAO24).push(pkt);
+      }
+
+      /* 2️⃣  sort each group chronologically (old → new) so
+           histories are built in the right order */
+      for (const list of byIcao.values()) {
+        list.sort((a, b) => {
+          const ta = a.LastContact ?? a.TimePosition ?? 0;
+          const tb = b.LastContact ?? b.TimePosition ?? 0;
+          return ta - tb;
         });
-  
-        /* purge stale aircraft */
-        for (const [id, p] of planes)
-          if (now - p.seenMs > 30_000) { planes.delete(id); histories.delete(id); }
-  
-      } catch (e) { console.error('poll', e); }
-    }
-  
-    /* ────────────── render loop ────────────── */
-    function animate() {
-      requestAnimationFrame(animate);
-      const now = Date.now();        // epoch‑ms
-  
-      arcBuf.fill(0);
-      histBuf.fill(0);
-      markerBuf.fill(0);
-      let idx = 0, ptr = 0, markPtr = 0;
-  
-      planes.forEach((p, id) => {
-        if (idx >= MAX_AIRCRAFT) return;
-  
-        /* predicted position */
-        let dt = (now - p.pktMs) / 1000;
-        if (!Number.isFinite(dt) || dt < 0) dt = 0;
-  
-        const hasMotion = p.vel > 0 && Number.isFinite(p.vel) &&
-                          p.hdg != null && Number.isFinite(p.hdg);
-  
-        let cur = (hasMotion && dt > 0)
-          ? latLonToVec3(...Object.values(predict(p.lat, p.lon, p.alt, p.vel, p.hdg, dt)))
-          : latLonToVec3(p.lat, p.lon, p.alt);
-  
-        /* blend in new telemetry smoothly */
-        if (now - p.snapStartMs < BLEND_MS) {
-          const t = (now - p.snapStartMs) / BLEND_MS;
-          cur = new THREE.Vector3().copy(p.snapStart).lerp(p.snapEnd, t);
-        }
-  
-        particles.setMatrixAt(idx, new THREE.Matrix4().setPosition(cur));
-  
-        /* history path */
-        const hist = histories.get(id) ?? [];
-        for (let i = 0; i < hist.length - 1; i++) {
-          const leg = arcPts(hist[i], hist[i + 1], SUB_SEGMENTS);
-          for (let j = 0; j < leg.length - 1 && ptr + 5 < histBuf.length; j++) {
-            histBuf.set(leg[j].toArray(), ptr);   ptr += 3;
-            histBuf.set(leg[j + 1].toArray(), ptr); ptr += 3;
-          }
+      }
+
+      /* 3️⃣  process each ICAO group */
+      const seenThisPoll = new Set();
+
+      for (const [icao, pkts] of byIcao) {
+        seenThisPoll.add(icao);
+        const last = pkts[pkts.length - 1];
+
+        /* turn the last packet into current state */
+        const alt  = last.BaroAltitude ?? last.GeoAltitude ?? 0;
+        const posV = latLonToVec3(last.Latitude, last.Longitude, alt);
+        const pktMs = (last.LastContact ?? toEpochMs(last.TimePosition)) * 1000 || now;
+
+        if (!planes.has(icao)) {
+         /* first time we ever see this aircraft */
+          planes.set(icao, {
+            lat: last.Latitude,  lon: last.Longitude,  alt,
+            vel: last.Velocity ?? 0,   hdg: last.TrueTrack ?? 0,
+            pktMs, seenMs: now,
+            animatedLat: last.Latitude, animatedLon: last.Longitude, animatedAlt: alt,
+            lastFrameMs: now,
+            snapStart: posV.clone(), snapEnd: posV.clone(), snapStartMs: now
+          });
+
+          /* entire history goes in, capped at MAX_HISTORY */
+          const hist = pkts.map(p => latLonToVec3(
+           p.Latitude,
+           p.Longitude,
+           p.BaroAltitude ?? p.GeoAltitude ?? 0
+          ));
+          histories.set(icao, hist.slice(-MAX_HISTORY));
+          continue;
         }
 
-        for (let i = 0; i < hist.length && markPtr + 2 < markerBuf.length; i++) {
-          markerBuf.set(hist[i].toArray(), markPtr);
-          markPtr += 3;
+       /* existing aircraft – update only with the *last* packet */
+        const p = planes.get(icao);
+        p.seenMs = now;
+        p.vel = last.Velocity   ?? p.vel;
+        p.hdg = last.TrueTrack  ?? p.hdg;
+
+        if (pktMs > p.pktMs) {
+          p.lat = last.Latitude; p.lon = last.Longitude; p.alt = alt; p.pktMs = pktMs;
+
+         /* start a smooth blend from where we thought the plane was */
+          const g = predict(p.animatedLat, p.animatedLon, p.animatedAlt,
+                             p.vel, p.hdg, (now - p.pktMs) / 1000);
+          p.snapStart   = latLonToVec3(g.lat, g.lon, g.alt);
+          p.snapEnd     = posV.clone();
+          p.snapStartMs = now;
+
+          /* push only the last fix into history */
+          const h = histories.get(icao);
+         h.push(posV.clone());
+         if (h.length > MAX_HISTORY) h.shift();
+        }
+      }
+
+      /* 4️⃣  drop aircraft that vanished from the latest poll */
+      for (const icao of planes.keys()) {
+        if (!seenThisPoll.has(icao)) {
+          planes.delete(icao);
+          histories.delete(icao);
+        }
+      }
+
+      /* 5️⃣  trigger geometry refresh */
+      needsUpdate = true;
+      firstPoll   = false;
+
+    } catch (err) {
+      console.error('poll', err);
+    }
+  }
+  
+    /* ───────── geometry refresh ───────── */
+    let needsUpdate = true, lastUpdate = 0;
+    function updateGeometry(now){
+      arcBuf.fill(0); histBuf.fill(0); markerBuf.fill(0);
+  
+      let idx=0, ptr=0, markPtr=0;
+      planes.forEach((p,id)=>{
+        if(idx>=MAX_AIRCRAFT) return;
+        let dt = Math.max(0,(now-p.pktMs)/1000);
+        if(dt>600) dt=600;                               // cap extrapolation
+        const hasMotion = p.vel>0 && Number.isFinite(p.vel) &&
+                          p.hdg!=null && Number.isFinite(p.hdg);
+        let cur = (hasMotion&&dt)
+          ? latLonToVec3(...Object.values(predict(p.lat,p.lon,p.alt,p.vel,p.hdg,dt)))
+          : latLonToVec3(p.lat,p.lon,p.alt);
+  
+        /* blend */
+        if(now-p.snapStartMs<BLEND_MS){
+          const t=(now-p.snapStartMs)/BLEND_MS;
+          cur = scratch.copy(p.snapStart).lerp(p.snapEnd,t).clone();
         }
   
-        /* live tail */
-        if (hist.length) {
-          const tail = arcPts(hist[hist.length - 1], cur, PATH_SEGMENTS);
-          for (let j = 0; j < PATH_SEGMENTS - 1; j++) {
-            const base = (idx * (PATH_SEGMENTS - 1) * 2 + j * 2) * 3;
-            arcBuf.set(tail[j].toArray(),     base);
-            arcBuf.set(tail[j + 1].toArray(), base + 3);
+        particles.setMatrixAt(idx,new THREE.Matrix4().setPosition(cur));
+  
+        /* history */
+        const hist = histories.get(id)??[];
+        for(let i=0;i<hist.length-1;i++){
+          const leg = arcPts(hist[i],hist[i+1],SUB_SEGMENTS);
+          for(let j=0;j<leg.length-1&&ptr+5<histBuf.length;j++){
+            histBuf.set(leg[j].toArray(),ptr);   ptr+=3;
+            histBuf.set(leg[j+1].toArray(),ptr); ptr+=3;
           }
         }
-  
+        for(let i=0;i<hist.length&&markPtr+2<markerBuf.length;i++){
+          markerBuf.set(hist[i].toArray(),markPtr); markPtr+=3;
+        }
+        /* live tail */
+        if(hist.length){
+          const tail=arcPts(hist[hist.length-1],cur,PATH_SEGMENTS);
+          for(let j=0;j<PATH_SEGMENTS-1;j++){
+            const base=(idx*(PATH_SEGMENTS-1)*2+j*2)*3;
+            arcBuf.set(tail[j].toArray(),base);
+            arcBuf.set(tail[j+1].toArray(),base+3);
+          }
+        }
         idx++;
       });
   
-      /* tell Three.js how many vertices/instances are valid */
       particles.count = idx;
-      arcGeom.setDrawRange(0, idx * (PATH_SEGMENTS - 1) * 2);
-      histGeom.setDrawRange(0, ptr / 3);
-      markerGeom.setDrawRange(0, markPtr / 3);          // number of vertices
+      arcGeom.setDrawRange(0,idx*(PATH_SEGMENTS-1)*2);
+      histGeom.setDrawRange(0,ptr/3);
+      markerGeom.setDrawRange(0,markPtr/3);
   
       arcGeom.attributes.position.needsUpdate  = true;
       histGeom.attributes.position.needsUpdate = true;
-      particles.instanceMatrix.needsUpdate     = true;
       markerGeom.attributes.position.needsUpdate = true;
+      particles.instanceMatrix.needsUpdate     = true;
+    }
 
+    function updateParticles(now) {
+  let idx = 0;
+  planes.forEach(p => {
+    if (idx >= MAX_AIRCRAFT) return;
+
+    /* incremental prediction: only from the last frame */
+    const dt = (now - p.lastFrameMs) / 1000;
+    p.lastFrameMs = now;
+
+    if (dt > 0 && p.vel > 0 && Number.isFinite(p.vel) &&
+        p.hdg != null && Number.isFinite(p.hdg)) {
+
+      const g = predict(p.animatedLat, p.animatedLon, p.animatedAlt,
+                        p.vel, p.hdg, dt);
+      p.animatedLat = g.lat;
+      p.animatedLon = g.lon;
+      /* alt may change with vertical_rate if you store it */
+
+      const pos = latLonToVec3(g.lat, g.lon, p.animatedAlt);
+      particles.setMatrixAt(idx, scratchMat.setPosition(pos));
+    } else {
+      /* stationary: put sphere at last authoritative point */
+      const pos = latLonToVec3(p.lat, p.lon, p.alt);
+      particles.setMatrixAt(idx, scratchMat.setPosition(pos));
+    }
+    idx++;
+  });
+  particles.count = idx;
+  particles.instanceMatrix.needsUpdate = true;
+}
+
+
+function logDisplayedAircraft() {
+  const out = [];                       // collect rows for console.table
+  let   shown = 0;
+
+  planes.forEach((p, icao) => {
+    if (shown >= MAX_AIRCRAFT) return;  // respect the visual cap
+
+    out.push({
+      ICAO24:  icao,
+      lat:     p.lat.toFixed(4),
+      lon:     p.lon.toFixed(4),
+      vel_mps: p.vel.toFixed(1),
+      hdg_deg: p.hdg?.toFixed(1) ?? '‑‑',
+      lastPkt: new Date(p.pktMs).toLocaleTimeString()
+    });
+    shown++;
+  });
+
+  /* nice formatted table in DevTools */
+  console.table(out);
+}
+let lastLog = 0;
+      function animate(){
+      requestAnimationFrame(animate);
+      const now = Date.now();
+  
+      /* throttled geometry update */
+      if(needsUpdate || now-lastUpdate > UPDATE_MS){
+        needsUpdate = false; lastUpdate = now;
+        if(pathsVisible) updateGeometry(now);
+      }
+
+      if (now - lastLog > 10_000) {          // 10‑s throttle
+    logDisplayedAircraft();
+    lastLog = now;
+  }
+
+    updateParticles(now);
       controls.update();
-      renderer.render(scene, camera);
+      renderer.render(scene,camera);
     }
   
-    /* ────────────── bootstrap ────────────── */
+    /* ───────── bootstrap ───────── */
     animate();
-    poll(); setInterval(poll, POLL_MS);
+    poll(); setInterval(poll,POLL_MS);
   
-    addEventListener('resize', () => {
-      camera.aspect = innerWidth / innerHeight;
+    addEventListener('resize',()=>{
+      camera.aspect = innerWidth/innerHeight;
       camera.updateProjectionMatrix();
-      renderer.setSize(innerWidth, innerHeight);
+      renderer.setSize(innerWidth,innerHeight);
     });
   </script>
   
