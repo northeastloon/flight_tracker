@@ -37,7 +37,7 @@ func Run() error {
 	ctx := context.Background()
 	fds := domain.NewFlightDataService(OpenSkyClient, db)
 
-	go fds.StartIngestionLoop(ctx, 10)
+	go fds.StartIngestionLoop(ctx, 1000)
 
 	//initialise server
 	server, err := server.NewServer(db)

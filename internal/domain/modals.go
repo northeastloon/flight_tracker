@@ -41,6 +41,7 @@ type TelemetryFilter struct {
 		Longitude float64
 		Radius    float64 // in kilometers
 	}
+	Latest *bool
 }
 
 type FlightDataProvider[T any] interface {

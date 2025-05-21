@@ -8,19 +8,34 @@ import (
 	"github.com/northeastloon/flight_tracker/internal/domain"
 )
 
-func buildTelemetryQuery(filter *domain.TelemetryFilter) (string, []interface{}) {
-	query := strings.Builder{}
-	query.WriteString(`
-        SELECT 
-            icao24, callsign, origin_country, time_position, last_contact,
-            longitude, latitude, baro_altitude, on_ground, velocity,
-            true_track, vertical_rate, sensors, geo_altitude, squawk,
-            spi, position_source, category
-        FROM aircraft_state
-        WHERE 1=1
-    `)
+func buildTelemetryQuery(filter *domain.TelemetryFilter) (string, []any) {
+	latest := filter != nil && filter.Latest != nil && *filter.Latest
 
-	var params []interface{}
+	var query strings.Builder
+	var params []any
+
+	// ---------- choose SELECT ----------
+	if latest {
+		query.WriteString(`
+            SELECT DISTINCT ON (icao24)
+                icao24, callsign, origin_country, time_position, last_contact,
+                longitude, latitude, baro_altitude, on_ground, velocity,
+                true_track, vertical_rate, sensors, geo_altitude, squawk,
+                spi, position_source, category
+            FROM aircraft_state
+            WHERE 1 = 1
+        `)
+	} else {
+		query.WriteString(`
+            SELECT
+                icao24, callsign, origin_country, time_position, last_contact,
+                longitude, latitude, baro_altitude, on_ground, velocity,
+                true_track, vertical_rate, sensors, geo_altitude, squawk,
+                spi, position_source, category
+            FROM aircraft_state
+            WHERE 1 = 1
+        `)
+	}
 
 	if filter != nil {
 		if filter.ICAO24 != nil {
@@ -67,7 +82,12 @@ func buildTelemetryQuery(filter *domain.TelemetryFilter) (string, []interface{})
 		}
 	}
 
-	query.WriteString(" ORDER BY last_contact DESC")
+	if latest {
+		query.WriteString(" ORDER BY icao24, last_contact DESC")
+	} else {
+		query.WriteString(" ORDER BY last_contact DESC")
+	}
+
 	return query.String(), params
 }
 
